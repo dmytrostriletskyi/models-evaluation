@@ -31,6 +31,9 @@ if __name__ == '__main__':
         metrics=[
             'roc_auc_score', 'accuracy_score', 'precision_score', 'recall_score', 'f1_score',
         ],
+        sort_by=[
+            'label', 'f1_score',
+        ],
         cross_validation_folds=3,
     )
     evaluation.execute()

@@ -2,8 +2,10 @@
 Provide implementation of the classification evaluation.
 """
 import re
-
-from tqdm import tqdm
+from multiprocessing import (
+    Process,
+    Manager,
+)
 
 import numpy
 import imblearn
@@ -20,7 +22,6 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.preprocessing import LabelBinarizer
 from sklearn.svm import SVC
 from sklearn.metrics import (
-    auc as get_auc,
     roc_auc_score as get_roc_auc_score,
     accuracy_score as get_accuracy_score,
     precision_score as get_precision_score,
@@ -62,6 +63,8 @@ class ClassificationEvaluation:
     Classification evaluation implementation.
     """
 
+    # TODO: human-readable headers.
+    # TODO: method of saving.
     def __init__(self,
             data_frame,
             features_columns,
@@ -72,6 +75,7 @@ class ClassificationEvaluation:
             samplings=None,
             excluded_labels=None,
             cross_validation_folds=None,
+            sort_by=None,
         ):
         """
         Construct the object
@@ -92,9 +96,13 @@ class ClassificationEvaluation:
         self.classifiers = classifiers
         self.metrics = metrics
         self.cross_validation_folds = cross_validation_folds
+        self.sort_by = sort_by
 
         if self.classifiers is None:
             self.classifiers = CLASSIFIERS.keys()
+
+        if self.sort_by is None:
+            self.sort_by = []
 
         if self.metrics is None:
             self.metrics = METRICS.keys()
@@ -150,176 +158,200 @@ class ClassificationEvaluation:
         unique_labels_number = len(self.unique_labels)
         print(f'The following number of unique labels will be processed: {unique_labels_number}.')
 
-        for unique_label in tqdm(self.unique_labels):
-            label_series = self.data_frame[f'is-{unique_label}']
+        evaluations = []
 
+        for unique_label in self.unique_labels:
             for classifier in self.classifiers:
-                classifier_class = CLASSIFIERS.get(classifier)
-                classifier_instance = classifier_class(probability=True) if 'SVC' in str(classifier) else classifier_class()
-
                 for feature_column in self.features_columns:
-                    feature_series = self.data_frame[feature_column]
-
                     for threshold in self.thresholds:
-                        # TODO: no sampling as well.
-                        for sampling in self.samplings:
-                            sampling_class = SAMPLINGS.get(sampling)
-
-                            for sampling_strategy in ['auto', 'minority', 'not minority', 'all']:
-                                sampling_instance = sampling_class(sampling_strategy=sampling_strategy)
-
-                                multilabel_binarizer = LabelBinarizer()
-                                transformed_labels = multilabel_binarizer.fit_transform(y=label_series)
-
-                                metrics_scores = {}
-                                is_sampling_failed = False
-
-                                for train_index, test_index in self.cross_validation.split(feature_series):
-                                    training_dataset, valuation_dataset = (
-                                        feature_series.iloc[train_index],
-                                        feature_series.iloc[test_index],
-                                    )
-
-                                    transformed_training_labels, transformed_valuation_labels = (
-                                        transformed_labels[train_index],
-                                        transformed_labels[test_index],
-                                    )
-
-                                    tfidf_vectorizer = TfidfVectorizer(max_df=0.8, max_features=10000)
-                                    transformed_training_dataset = tfidf_vectorizer.fit_transform(training_dataset)
-                                    transformed_valuation_dataset = tfidf_vectorizer.transform(valuation_dataset)
-
-                                    try:
-                                        transformed_training_dataset, transformed_training_labels = sampling_instance.fit_resample(
-                                            transformed_training_dataset,
-                                            transformed_training_labels,
-                                        )
-
-                                    except TypeError:
-                                        transformed_training_dataset, transformed_training_labels = sampling.fit_resample(
-                                            transformed_training_dataset.toarray(),
-                                            transformed_training_labels,
-                                        )
-
-                                    except ValueError:
-                                        print(f'Sampling {sampling} with strategy {sampling_strategy} for {unique_label}, {classifier}, {feature_column}, {threshold} is failed.')
-                                        is_sampling_failed = True
-                                        break
-
-                                    classifier_instance.fit(
-                                        transformed_training_dataset,
-                                        numpy.ravel(transformed_training_labels, order='C'),
-                                    )
-
-                                    transformed_predicted_valuation_labels = \
-                                        classifier_instance.predict_proba(transformed_valuation_dataset)[::, 1]
-
-                                    transformed_predicted_valuation_labels = (
-                                            transformed_predicted_valuation_labels >= threshold
-                                    ).astype(int)
-
-                                    for metric in self.metrics:
-                                        metric_function = METRICS.get(metric)
-
-                                        metric_score = metric_function(
-                                            transformed_valuation_labels[::, 0],
-                                            transformed_predicted_valuation_labels,
-                                        )
-
-                                        if metric not in metrics_scores:
-                                            metrics_scores[metric] = 0
-
-                                        metrics_scores[metric] += float(
-                                            '{:.2f}'.format(metric_score / self.cross_validation_folds),
-                                        )
-
-                                if not is_sampling_failed:
-                                    # TODO: human-readable headers.
-                                    variants = {
-                                        'label': [unique_label],
-                                        'classifier': [classifier],
-                                        'feature': [feature_column],
-                                        'threshold': [threshold],
-                                        'sampling': [sampling],
-                                        'sampling strategy': [sampling_strategy],
-                                        **metrics_scores,
-                                    }
-
-                                    evaluation_iteration_data_frame = pandas.DataFrame(variants)
-
-                                    self.evaluation_data_frame = self.evaluation_data_frame.append(
-                                        evaluation_iteration_data_frame,
-                                        ignore_index=True,
-                                    )
-
-                        # No sampling evaluation.
-                        # TODO: maybe move to the separate function and reuse.
-                        multilabel_binarizer = LabelBinarizer()
-                        transformed_labels = multilabel_binarizer.fit_transform(y=label_series)
-
-                        metrics_scores = {}
-
-                        for train_index, test_index in self.cross_validation.split(feature_series):
-                            training_dataset, valuation_dataset = (
-                                feature_series.iloc[train_index],
-                                feature_series.iloc[test_index],
-                            )
-
-                            transformed_training_labels, transformed_valuation_labels = (
-                                transformed_labels[train_index],
-                                transformed_labels[test_index],
-                            )
-
-                            tfidf_vectorizer = TfidfVectorizer(max_df=0.8, max_features=10000)
-                            transformed_training_dataset = tfidf_vectorizer.fit_transform(training_dataset)
-                            transformed_valuation_dataset = tfidf_vectorizer.transform(valuation_dataset)
-
-                            classifier_instance.fit(
-                                transformed_training_dataset,
-                                numpy.ravel(transformed_training_labels, order='C'),
-                            )
-
-                            transformed_predicted_valuation_labels = \
-                                classifier_instance.predict_proba(transformed_valuation_dataset)[::, 1]
-
-                            transformed_predicted_valuation_labels = (
-                                    transformed_predicted_valuation_labels >= threshold
-                            ).astype(int)
-
-                            for metric in self.metrics:
-                                metric_function = METRICS.get(metric)
-
-                                metric_score = metric_function(
-                                    transformed_valuation_labels[::, 0],
-                                    transformed_predicted_valuation_labels,
-                                )
-
-                                if metric not in metrics_scores:
-                                    metrics_scores[metric] = 0
-
-                                metrics_scores[metric] += float(
-                                    '{:.2f}'.format(metric_score / self.cross_validation_folds),
-                                )
-
-                        variants = {
-                            'label': [unique_label],
-                            'classifier': [classifier],
-                            'feature': [feature_column],
-                            'threshold': [threshold],
-                            'sampling': ['-'],
-                            'sampling strategy': ['-'],
-                            **metrics_scores,
-                        }
-
-                        evaluation_iteration_data_frame = pandas.DataFrame(variants)
-
-                        self.evaluation_data_frame = self.evaluation_data_frame.append(
-                            evaluation_iteration_data_frame,
-                            ignore_index=True,
+                        evaluations.append(
+                            (unique_label, classifier, feature_column, threshold),
                         )
 
-        # TODO: choose sorting metric.
-        self.evaluation_data_frame = self.evaluation_data_frame.sort_values(by=['f1_score'], ascending=False)
+        processes_returns = Manager().list()
+        processes = []
 
-        data_frame_to_print = tabulate(self.evaluation_data_frame, headers='keys', tablefmt='psql')
+        for evaluation in evaluations:
+            process = Process(target=self._evaluate, args=(*evaluation, processes_returns))
+            processes.append(process)
+            process.start()
+
+        for process in processes:
+            process.join()
+
+        for process_return in processes_returns:
+            self.evaluation_data_frame = self.evaluation_data_frame.append(
+                pandas.DataFrame(process_return),
+                ignore_index=True,
+            )
+
+        self.evaluation_data_frame = self.evaluation_data_frame.sort_values(
+            by=self.sort_by,
+            ascending=False,
+        )
+
+        data_frame_to_print = tabulate(
+            self.evaluation_data_frame,
+            headers='keys',
+            tablefmt='psql',
+        )
+
         print(data_frame_to_print)
+
+    def _evaluate(self, unique_label, classifier, feature_column, threshold, process_return):
+        """
+        Evaluate a specific label, classifier, feature_column and threshold.
+        """
+        classifier_class = CLASSIFIERS.get(classifier)
+        classifier_instance = classifier_class(probability=True) if 'SVC' in str(classifier) else classifier_class()
+
+        feature_series = self.data_frame[feature_column]
+        label_series = self.data_frame[f'is-{unique_label}']
+
+        for sampling in self.samplings:
+            sampling_class = SAMPLINGS.get(sampling)
+
+            for sampling_strategy in ['not majority', 'minority', 'not minority', 'all']:
+                sampling_instance = sampling_class(sampling_strategy=sampling_strategy)
+
+                multilabel_binarizer = LabelBinarizer()
+                transformed_labels = multilabel_binarizer.fit_transform(y=label_series)
+
+                metrics_scores = {}
+                is_sampling_failed = False
+
+                for train_index, test_index in self.cross_validation.split(feature_series):
+                    training_dataset, valuation_dataset = (
+                        feature_series.iloc[train_index],
+                        feature_series.iloc[test_index],
+                    )
+
+                    transformed_training_labels, transformed_valuation_labels = (
+                        transformed_labels[train_index],
+                        transformed_labels[test_index],
+                    )
+
+                    tfidf_vectorizer = TfidfVectorizer(max_df=0.8, max_features=10000)
+                    transformed_training_dataset = tfidf_vectorizer.fit_transform(training_dataset)
+                    transformed_valuation_dataset = tfidf_vectorizer.transform(valuation_dataset)
+
+                    try:
+                        transformed_training_dataset, transformed_training_labels = sampling_instance.fit_resample(
+                            transformed_training_dataset,
+                            transformed_training_labels,
+                        )
+
+                    except TypeError:
+                        transformed_training_dataset, transformed_training_labels = sampling.fit_resample(
+                            transformed_training_dataset.toarray(),
+                            transformed_training_labels,
+                        )
+
+                    except ValueError:
+                        print(
+                            f'Sampling {sampling} with strategy {sampling_strategy} for '
+                            f'{unique_label}, {classifier}, {feature_column}, {threshold} '
+                            f'is failed. Evaluation without sampling will happen.',
+                        )
+
+                        is_sampling_failed = True
+                        break
+
+                    classifier_instance.fit(
+                        transformed_training_dataset,
+                        numpy.ravel(transformed_training_labels, order='C'),
+                    )
+
+                    transformed_predicted_valuation_labels = \
+                        classifier_instance.predict_proba(transformed_valuation_dataset)[::, 1]
+
+                    transformed_predicted_valuation_labels = (
+                            transformed_predicted_valuation_labels >= threshold
+                    ).astype(int)
+
+                    for metric in self.metrics:
+                        metric_function = METRICS.get(metric)
+
+                        metric_score = metric_function(
+                            transformed_valuation_labels[::, 0],
+                            transformed_predicted_valuation_labels,
+                        )
+
+                        if metric not in metrics_scores:
+                            metrics_scores[metric] = 0
+
+                        metrics_scores[metric] += float(
+                            '{:.2f}'.format(metric_score / self.cross_validation_folds),
+                        )
+
+                if not is_sampling_failed:
+                    variants = {
+                        'label': [unique_label],
+                        'classifier': [classifier],
+                        'feature': [feature_column],
+                        'threshold': [threshold],
+                        'sampling': [sampling],
+                        'sampling strategy': [sampling_strategy],
+                        **metrics_scores,
+                    }
+
+                    process_return.append(variants)
+
+        multilabel_binarizer = LabelBinarizer()
+        transformed_labels = multilabel_binarizer.fit_transform(y=label_series)
+
+        metrics_scores = {}
+
+        for train_index, test_index in self.cross_validation.split(feature_series):
+            training_dataset, valuation_dataset = (
+                feature_series.iloc[train_index],
+                feature_series.iloc[test_index],
+            )
+
+            transformed_training_labels, transformed_valuation_labels = (
+                transformed_labels[train_index],
+                transformed_labels[test_index],
+            )
+
+            tfidf_vectorizer = TfidfVectorizer(max_df=0.8, max_features=10000)
+            transformed_training_dataset = tfidf_vectorizer.fit_transform(training_dataset)
+            transformed_valuation_dataset = tfidf_vectorizer.transform(valuation_dataset)
+
+            classifier_instance.fit(
+                transformed_training_dataset,
+                numpy.ravel(transformed_training_labels, order='C'),
+            )
+
+            transformed_predicted_valuation_labels = \
+                classifier_instance.predict_proba(transformed_valuation_dataset)[::, 1]
+
+            transformed_predicted_valuation_labels = (
+                    transformed_predicted_valuation_labels >= threshold
+            ).astype(int)
+
+            for metric in self.metrics:
+                metric_function = METRICS.get(metric)
+
+                metric_score = metric_function(
+                    transformed_valuation_labels[::, 0],
+                    transformed_predicted_valuation_labels,
+                )
+
+                if metric not in metrics_scores:
+                    metrics_scores[metric] = 0
+
+                metrics_scores[metric] += float(
+                    '{:.2f}'.format(metric_score / self.cross_validation_folds),
+                )
+
+        variants = {
+            'label': [unique_label],
+            'classifier': [classifier],
+            'feature': [feature_column],
+            'threshold': [threshold],
+            'sampling': ['-'],
+            'sampling strategy': ['-'],
+            **metrics_scores,
+        }
+
+        process_return.append(variants)
